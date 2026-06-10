@@ -1,15 +1,19 @@
-# Contribution [#]: [Issue Title]
+# Contribution 1: OpenCode crashes on startup when .agents/ contains Cursor-format agent files
 
-**Contribution Number:** [1 / 2 / 3]  
-**Student:** [Joshua Liu]  
-**Issue:** [GitHub issue link]  
-**Status:** [Phase I / Phase II / Phase III / Phase IV] [In Progress / Complete]
+**Contribution Number:** 1  
+**Student:** Joshua Liu  
+**Issue:** [sst/opencode#31481](https://github.com/sst/opencode/issues/31481)  
+**Related:** [sst/opencode#27133](https://github.com/sst/opencode/issues/27133)  
+**Fork:** [github.com/NumerousJLs/opencode](https://github.com/NumerousJLs/opencode)  
+**Status:** Phase I Complete
 
 ---
 
 ## Why I Chose This Issue
 
-[1-2 paragraphs explaining why this issue interests you, how it matches your skills/learning goals, what you hope to learn]
+opencode is one of the most active open source AI coding agent projects right now (172k+ stars, multiple external contributor PRs merged same-day). I wanted a bug fix with a clear root cause rather than a vague feature request, and this one stood out because the fix is fully traceable in the source. The error message in the crash log literally tells you where to look: `SchemaError: Expected object | undefined, got ["execute/runNotebookCell"] at ["tools"]`. The bug is that `packages/opencode/src/config/agent.ts`'s `load()` function calls `ConfigParse.schema()` which throws on any schema mismatch, crashing the whole startup. The fix already exists in the same file — `loadMode()` uses a graceful `Exit.isSuccess` pattern to skip invalid files instead of throwing. The issue also has a related open issue (#27133) that frames the broader inconsistency and was filed months earlier, so fixing both together makes the PR more useful.
+
+I read the CONTRIBUTING guide, studied 10+ recent merged PRs to understand the PR format and style expectations, and confirmed the root cause by reading the source before claiming.
 
 ---
 
@@ -17,19 +21,31 @@
 
 ### Problem Description
 
-[In your own words, what's broken or missing?]
+opencode is an AI coding agent with support for custom `.agents/` directories. Cursor, another AI coding tool, also uses `.agents/` with a different frontmatter format where `tools` is a YAML array (`tools: [execute/runNotebookCell]`). When opencode tries to load an agent file using Cursor's format, it throws a `ConfigInvalidError` that crashes the entire startup — all 4-5 API requests fail, nothing loads.
+
+The same file in `.opencode/mode/` would be silently skipped instead of crashing, because `loadMode()` was written with a graceful failure path. `load()` for agents was not.
 
 ### Expected Behavior
 
-[What should happen?]
+An invalid or incompatible agent file should be skipped with a warning, and the rest of the agents should load normally. Same behavior as `loadMode()`.
 
 ### Current Behavior
 
-[What actually happens?]
+Any schema-invalid agent file in `.agents/` crashes the entire startup:
+
+```
+SchemaError: Expected object | undefined, got ["execute/runNotebookCell"]
+  at ["tools"]
+ConfigInvalidError: ConfigInvalidError
+...
+Error: 4 of 5 requests failed: Unexpected server error.
+```
 
 ### Affected Components
 
-[Which parts of the codebase are involved?]
+`packages/opencode/src/config/agent.ts` — the `load()` function calls `ConfigParse.schema(ConfigAgentV1.Info, config, item)` which throws on schema mismatch. Compare to `loadMode()` in the same file which uses `Schema.decodeUnknownExit()` + `Exit.isSuccess()` to skip invalid files gracefully.
+
+The schema itself (`packages/core/src/v1/config/agent.ts`) defines `tools` as `Schema.optional(Schema.Record(Schema.String, Schema.Boolean))` — a key-value object. Cursor-format files pass a YAML array, which fails the schema check.
 
 ---
 
@@ -37,19 +53,26 @@
 
 ### Environment Setup
 
-[Notes on setting up your local development environment - challenges you faced, how you solved them]
+Requirements: Bun 1.3+. Clone the repo, run `bun install` from the root, then `bun dev <dir>` to run against a directory.
 
 ### Steps to Reproduce
 
-1. [Step 1]
-2. [Step 2]
-3. [Observed result]
+1. Create a directory with `.agents/agents/example.agent.md`:
+```markdown
+---
+name: "My Agent"
+description: "Test agent"
+tools: [execute/runNotebookCell]
+---
+You are a helpful assistant.
+```
+2. Run `opencode` (or `bun dev`) in that directory.
+3. Startup crashes with `4 of 5 requests failed: Unexpected server error`.
 
 ### Reproduction Evidence
 
-- **Commit showing reproduction:** [Link to commit in your fork]
-- **Screenshots/logs:** [If applicable]
-- **My findings:** [What you discovered during reproduction]
+- **Root cause confirmed in source:** `packages/opencode/src/config/agent.ts` line `result[config.name] = ConfigParse.schema(ConfigAgentV1.Info, config, item)` throws when `tools` is an array instead of an object.
+- **Fix pattern already in same file:** `loadMode()` (lines below `load()`) uses `Exit.isSuccess(parsed)` and simply continues on failure.
 
 ---
 
@@ -57,30 +80,35 @@
 
 ### Analysis
 
-[Your analysis of the root cause - what's causing the issue?]
+`load()` and `loadMode()` in `packages/opencode/src/config/agent.ts` both parse markdown frontmatter files into `ConfigAgentV1.Info`. They were written with different error handling:
 
-### Proposed Solution
+- `loadMode()`: Uses `Schema.decodeUnknownExit()` and checks `Exit.isSuccess()` — skips invalid files, keeps loading.
+- `load()`: Uses `ConfigParse.schema()` — throws `InvalidError` on any schema mismatch, propagating up through `Config.loadInstanceState` and crashing startup.
 
-[High-level description of your fix approach]
+The fix is to make `load()` consistent with `loadMode()`.
 
 ### Implementation Plan
 
-Using UMPIRE framework (adapted):
+**Understand:** A schema-invalid `.agents/` file crashes startup because `load()` throws rather than skips.
 
-**Understand:** [Restate the problem]
+**Match:** `loadMode()` in the same file already uses the correct pattern. `ConfigCommand.load()` in `config/command.ts` is another reference for the `Exit.isSuccess` pattern with `Cause` for error details.
 
-**Match:** [What similar patterns/solutions exist in the codebase?]
+**Plan:**
+1. In `load()`, replace `ConfigParse.schema(ConfigAgentV1.Info, config, item)` with `Schema.decodeUnknownExit(ConfigAgentV1.Info)(config, ...)`.
+2. Wrap in `Exit.isSuccess` check — add the agent to the result on success, skip (with a logged warning) on failure.
+3. Add `Cause` import from `effect` to format the error message in the warning.
+4. Apply the same improvement to `loadMode()` — currently it silently skips, which is also unhelpful. Add a warning there too for consistency (addresses #27133's point that both should surface errors).
+5. Write a test that verifies a directory with one valid and one invalid agent file loads the valid agent without crashing.
 
-**Plan:** [Step-by-step implementation plan]
-1. [Modify file X to do Y]
-2. [Add function Z]
-3. [Update tests]
+**Implement:** Branch off `dev` (not `main` — opencode's default branch is `dev`).
 
-**Implement:** [Link to your branch/commits as you work]
+**Review:** 
+- PR title follows `fix(opencode): <summary>` convention.
+- PR body uses the template: Closes #31481, Closes #27133.
+- Keep description short and in own words — no AI-generated walls of text.
+- Run `bun typecheck` and `bun test packages/opencode/test/config/` before opening PR.
 
-**Review:** [Self-review checklist - does it follow the project's contribution guidelines?]
-
-**Evaluate:** [How will you verify it works?]
+**Evaluate:** Create a test directory with one valid and one broken agent file. Startup should succeed and load the valid agent. The broken agent's name should appear in a warning.
 
 ---
 
@@ -88,71 +116,37 @@ Using UMPIRE framework (adapted):
 
 ### Unit Tests
 
-- [ ] Test case 1: [Description]
-- [ ] Test case 2: [Description]
-- [ ] Test case 3: [Description]
-
-### Integration Tests
-
-- [ ] Integration scenario 1
-- [ ] Integration scenario 2
+- [ ] Test: directory with 1 valid + 1 invalid agent file loads valid agent without crashing
+- [ ] Test: directory with 1 valid + 1 invalid mode file loads valid mode and logs a warning
+- [ ] Test: all-valid agent directory still loads all agents (regression)
 
 ### Manual Testing
 
-[What you tested manually and results]
+Run `bun dev` against a test directory containing:
+- A valid agent with object-format `tools`
+- An invalid agent with array-format `tools` (Cursor-style)
+
+Expected: startup succeeds, valid agent loads, warning shown for invalid agent.
 
 ---
 
 ## Implementation Notes
 
-### Week [X] Progress
-
-[What you built this week, challenges faced, decisions made]
-
-### Week [Y] Progress
-
-[Continue documenting as you work]
-
-### Code Changes
-
-- **Files modified:** [List]
-- **Key commits:** [Links to important commits]
-- **Approach decisions:** [Why you chose certain approaches]
+*To be filled in during Phase III.*
 
 ---
 
 ## Pull Request
 
-**PR Link:** [GitHub PR URL when submitted]
-
-**PR Description:** [Draft or final PR description - much of the content above can be adapted]
+**PR Link:** [To be added]
 
 **Maintainer Feedback:**
-- [Date]: [Summary of feedback received]
-- [Date]: [How you addressed it]
+*To be filled in during Phase IV.*
 
-**Status:** [Awaiting review / Iterating / Approved / Merged]
+**Status:** Not yet submitted
 
 ---
 
 ## Learnings & Reflections
 
-### Technical Skills Gained
-
-[What you learned technically]
-
-### Challenges Overcome
-
-[What was hard and how you solved it]
-
-### What I'd Do Differently Next Time
-
-[Reflection on your process]
-
----
-
-## Resources Used
-
-- [Link to helpful documentation]
-- [Tutorial or Stack Overflow post that helped]
-- [GitHub issues or discussions that helped]
+*To be filled in at the end of the program.*
