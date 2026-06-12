@@ -5,7 +5,8 @@
 **Issue:** [sst/opencode#31481](https://github.com/sst/opencode/issues/31481)  
 **Related:** [sst/opencode#27133](https://github.com/sst/opencode/issues/27133)  
 **Fork:** [github.com/NumerousJLs/opencode](https://github.com/NumerousJLs/opencode)  
-**Status:** Phase I Complete
+**Branch:** `fix/agent-load-graceful-skip` (off `dev`)  
+**Status:** Phase III Complete (fix written, tested, and verified locally; PR opens in Phase IV)
 
 ---
 
@@ -69,10 +70,29 @@ You are a helpful assistant.
 2. Run `opencode` (or `bun dev`) in that directory.
 3. Startup crashes with `4 of 5 requests failed: Unexpected server error`.
 
+### How I Actually Reproduced It
+
+The reporter ran the full app, but to isolate the bug I called the affected
+function directly. `load()` scans `{agent,agents}/**/*.md` relative to each
+config dir, so I built a folder with an `agents/` subdir containing one valid
+agent and one Cursor-format agent (`tools` as a YAML array), then called
+`ConfigAgent.load(dir)` on the current `dev` branch.
+
+**Before the fix (the bug):**
+- `load()` **threw `ConfigInvalidError`** — so *none* of the agents loaded, not
+  even the valid one. This is the startup crash (`4 of 5 requests failed`).
+- `loadMode()` on a folder with a valid + invalid mode returned only the valid
+  mode and **silently dropped** the invalid one — no error, no warning. This is
+  the agent-vs-mode inconsistency in #27133.
+
 ### Reproduction Evidence
 
-- **Root cause confirmed in source:** `packages/opencode/src/config/agent.ts` line `result[config.name] = ConfigParse.schema(ConfigAgentV1.Info, config, item)` throws when `tools` is an array instead of an object.
-- **Fix pattern already in same file:** `loadMode()` (lines below `load()`) uses `Exit.isSuccess(parsed)` and simply continues on failure.
+- **Root cause confirmed in source:** `packages/opencode/src/config/agent.ts`,
+  `result[config.name] = ConfigParse.schema(ConfigAgentV1.Info, config, item)`
+  throws when `tools` is an array instead of an object.
+- **Fix pattern already in same file:** `loadMode()` (just below `load()`) uses
+  `Schema.decodeUnknownExit` + `Exit.isSuccess(parsed)` and continues on failure.
+- **Confirmed still present on latest `dev`** at the time of work.
 
 ---
 
@@ -93,14 +113,16 @@ The fix is to make `load()` consistent with `loadMode()`.
 
 **Match:** `loadMode()` in the same file already uses the correct pattern. `ConfigCommand.load()` in `config/command.ts` is another reference for the `Exit.isSuccess` pattern with `Cause` for error details.
 
-**Plan:**
-1. In `load()`, replace `ConfigParse.schema(ConfigAgentV1.Info, config, item)` with `Schema.decodeUnknownExit(ConfigAgentV1.Info)(config, ...)`.
-2. Wrap in `Exit.isSuccess` check — add the agent to the result on success, skip (with a logged warning) on failure.
-3. Add `Cause` import from `effect` to format the error message in the warning.
-4. Apply the same improvement to `loadMode()` — currently it silently skips, which is also unhelpful. Add a warning there too for consistency (addresses #27133's point that both should surface errors).
-5. Write a test that verifies a directory with one valid and one invalid agent file loads the valid agent without crashing.
+**Plan (as executed):**
+1. In `load()`, replaced `ConfigParse.schema(...)` with `Schema.decodeUnknownExit(ConfigAgentV1.Info)(config, ...)` and an `Exit.isSuccess` check — keep the agent on success, skip on failure.
+2. On the skip path, emit `console.warn` naming the file and the schema error. (Chose `console.warn` because these are plain `async` functions called via `Effect.promise`, not Effect contexts; `console.warn` is already used elsewhere in the package and keeps the change minimal. Routing through the Effect logger would mean restructuring return types and both call sites — out of scope for a bug fix.)
+3. Added the `Cause` import from `effect` to format the error in the warning; removed the now-unused `ConfigParse` import.
+4. Applied the same warning to `loadMode()`'s existing skip path so a bad mode file is visible too (resolves #27133).
+5. Added a test that pins the regression: one valid + one invalid file → valid loads, no crash.
 
-**Implement:** Branch off `dev` (not `main` — opencode's default branch is `dev`).
+**Decision left out of scope:** actually *converting* Cursor's array format into opencode's permission model. That's a feature, not a bug fix, and it carries a semantic-mismatch risk (Cursor's tool names aren't opencode tools), so per opencode's "features need design discussion first" rule it would belong in a separate feature-request issue. This PR only stops the crash and makes skips visible.
+
+**Implement:** Branched off `dev` (opencode's default branch is `dev`, not `main`).
 
 **Review:** 
 - PR title follows `fix(opencode): <summary>` convention.
@@ -114,36 +136,80 @@ The fix is to make `load()` consistent with `loadMode()`.
 
 ## Testing Strategy
 
-### Unit Tests
+### Unit Tests (added in `packages/opencode/test/config/agent.test.ts`)
 
-- [ ] Test: directory with 1 valid + 1 invalid agent file loads valid agent without crashing
-- [ ] Test: directory with 1 valid + 1 invalid mode file loads valid mode and logs a warning
-- [ ] Test: all-valid agent directory still loads all agents (regression)
+- [x] `load()` does not throw when an agent file is invalid
+- [x] `load()` keeps valid agents and skips the invalid Cursor-format one
+- [x] `loadMode()` keeps valid modes and skips the invalid one
+
+The test creates a temp dir with `agents/valid.md`, `agents/cursor.md` (array
+`tools`), `modes/valid.md`, and `modes/bad.md`, then asserts the valid entries
+load and the invalid ones are dropped without throwing.
+
+**Fail-before / pass-after confirmed:** with the source fix temporarily reverted,
+the new test fails (2 of 3 cases) because `load()` throws; with the fix in place
+it passes (3 of 3). This proves the test pins the actual regression.
 
 ### Manual Testing
 
-Run `bun dev` against a test directory containing:
-- A valid agent with object-format `tools`
-- An invalid agent with array-format `tools` (Cursor-style)
-
-Expected: startup succeeds, valid agent loads, warning shown for invalid agent.
+Called `ConfigAgent.load()` and `ConfigAgent.loadMode()` directly against a temp
+folder with valid + invalid files. Before: `load()` threw and returned nothing.
+After: the valid agent loads and the invalid one is skipped with a warning that
+names the file and the schema error (`Expected object ... got [array] at tools`).
 
 ---
 
 ## Implementation Notes
 
-*To be filled in during Phase III.*
+### What I built
+
+Two targeted edits in `packages/opencode/src/config/agent.ts` (the only source
+file changed):
+
+- **`load()`** — switched from the throwing `ConfigParse.schema()` to
+  `Schema.decodeUnknownExit` + `Exit.isSuccess`. On success the agent is added;
+  on failure the file is skipped with a `console.warn`. Removed the now-unused
+  `ConfigParse` import; added `Cause` for the warning message.
+- **`loadMode()`** — added the same `console.warn` on its existing skip path so a
+  bad mode file is no longer silently dropped (#27133).
+
+Net change: one source file (~12 lines) plus one new test file. I left
+`ConfigParse.schema()` itself unchanged, since throwing is the correct behavior
+for a single intentional config file like `opencode.json`.
+
+### Verification (all clean)
+
+- `bun typecheck` — pass
+- `oxlint` on the changed + new files — 0 warnings, 0 errors
+- `git diff --check` — clean
+- `bun test test/config test/agent` — 233 pass, 0 fail (was 230 + 3 new)
+
+### Challenges / notes
+
+- The biggest correctness check was confirming `load()` *throws* (not "returns
+  empty"). An early repro used a directory layout that didn't match the glob
+  `load()` scans, so it found no files and looked like it returned `{}`. Fixing
+  the layout to `agents/*.md` showed the real behavior: it throws.
+- Logging mechanism was the one judgment call. Picked `console.warn` for minimal
+  blast radius (these aren't Effect contexts); flagged it as the place a
+  maintainer might prefer a different approach.
+
+### Code Changes
+
+- **Files modified:** `packages/opencode/src/config/agent.ts`
+- **Files added:** `packages/opencode/test/config/agent.test.ts`
+- **Commit:** `fix(opencode): skip invalid agent config files instead of crashing startup`
 
 ---
 
 ## Pull Request
 
-**PR Link:** [To be added]
+**PR Link:** *Opens in Phase IV — branch `fix/agent-load-graceful-skip` is committed locally and ready to push.*
 
 **Maintainer Feedback:**
 *To be filled in during Phase IV.*
 
-**Status:** Not yet submitted
+**Status:** Fix complete and verified locally; PR not yet opened.
 
 ---
 
