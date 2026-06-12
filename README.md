@@ -6,7 +6,8 @@
 **Related:** [sst/opencode#27133](https://github.com/sst/opencode/issues/27133)  
 **Fork:** [github.com/NumerousJLs/opencode](https://github.com/NumerousJLs/opencode)  
 **Branch:** `fix/agent-load-graceful-skip` (off `dev`)  
-**Status:** Phase III Complete (fix written, tested, and verified locally; PR opens in Phase IV)
+**Pull Request:** [anomalyco/opencode#31992](https://github.com/anomalyco/opencode/pull/31992)  
+**Status:** Phase IV — PR submitted, awaiting maintainer review
 
 ---
 
@@ -204,12 +205,16 @@ for a single intentional config file like `opencode.json`.
 
 ## Pull Request
 
-**PR Link:** *Opens in Phase IV — branch `fix/agent-load-graceful-skip` is committed locally and ready to push.*
+**PR Link:** [anomalyco/opencode#31992](https://github.com/anomalyco/opencode/pull/31992)
+
+**Summary:** Makes `load()` and `loadMode()` in `packages/opencode/src/config/agent.ts` skip an invalid agent or mode config file with a warning instead of throwing (which crashed startup) or dropping it silently. Valid agents and modes still load. Closes #31481 and #27133. The PR is two files: the fix and a regression test.
+
+**Verification:** `bun typecheck`, `oxlint`, and `git diff --check` clean; `bun test test/config test/agent` passes 233. The repo's `check-compliance`, `check-standards`, and contributor-label CI checks all passed on open.
 
 **Maintainer Feedback:**
-*To be filled in during Phase IV.*
+*None yet — awaiting review.*
 
-**Status:** Fix complete and verified locally; PR not yet opened.
+**Status:** Awaiting review
 
 ---
 
