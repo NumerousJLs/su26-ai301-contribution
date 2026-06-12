@@ -7,7 +7,7 @@
 **Fork:** [github.com/NumerousJLs/opencode](https://github.com/NumerousJLs/opencode)  
 **Branch:** `fix/agent-load-graceful-skip` (off `dev`)  
 **Pull Request:** [anomalyco/opencode#31992](https://github.com/anomalyco/opencode/pull/31992)  
-**Status:** Phase IV — PR submitted, awaiting maintainer review
+**Status:** Phase IV Complete — PR submitted; deferred to earlier duplicate PR #29784
 
 ---
 
@@ -211,13 +211,26 @@ for a single intentional config file like `opencode.json`.
 
 **Verification:** `bun typecheck`, `oxlint`, and `git diff --check` clean; `bun test test/config test/agent` passes 233. The repo's `check-compliance`, `check-standards`, and contributor-label CI checks all passed on open.
 
-**Maintainer Feedback:**
-*None yet — awaiting review.*
+**Maintainer Feedback:** The repository's duplicate-detection bot flagged an earlier pull request, [#29784](https://github.com/anomalyco/opencode/pull/29784), which I confirmed is a genuine duplicate. It predates mine by two weeks, changes the same file, takes the same approach to #27133, and reports invalid files through a structured `Session.Event.Error` rather than a console warning, which is a more complete answer to the issue. The right thing in open source when you find an earlier active PR doing the same work is to defer to it, so I am closing mine in favor of #29784 and noting there that it also resolves #31481.
 
-**Status:** Awaiting review
+**Status:** Submitted, then deferred to the earlier duplicate PR #29784.
 
 ---
 
 ## Learnings & Reflections
 
-*To be filled in at the end of the program.*
+### Technical skills gained
+
+I learned how opencode is built, which was new ground: a Bun and TypeScript monorepo on the Effect library, where errors and dependencies are explicit values rather than thrown exceptions. The whole bug came down to that model. One loader validated with a helper that throws, its sibling validated with `Schema.decodeUnknownExit` and checked the result as an `Exit` value, and the fix was to make the throwing one behave like the safe one. I also learned to read a project's culture from its data instead of guessing, by measuring review latency, how often outside contributors get merged, and whether PRs carry inline comments, which told me opencode wants short prose descriptions and almost no annotation.
+
+### The biggest lesson
+
+Two things I will not repeat. First, I based my branch on a dev commit that the maintainers later force-pushed away, and without a rebase the pull request would have carried thirty-seven unrelated files. The check that catches this is the full three-dot diff against current upstream, `git diff upstream/dev...HEAD`, not just checking whether my own file conflicts. Second, and more important, I opened a pull request that duplicated an existing active one because I trusted a single search that came back empty. The reliable way to find existing PRs is the issue timeline, which lists every PR that references the issue, not a body-text search. I should run that check for every issue I plan to close, and run it again right before opening.
+
+### What I would do differently
+
+Spend more of the up-front time confirming the issue is genuinely unclaimed, using the timeline and a keyword search rather than one query, before writing any code. The fix itself was small and correct. The cost came from skipping that verification, which is cheap compared to the work it would have saved.
+
+### On the outcome
+
+The pull request did not merge, and that is a normal open source result. The milestone was a clean, review-ready submission, which I made, and the more valuable part was learning how a real project's review process, culture, and contributor etiquette actually work. Deferring gracefully to an earlier contributor is part of that, and it was worth doing right.
