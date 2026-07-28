@@ -129,12 +129,12 @@ The limit itself is correct behavior; its position in the pipeline is the defect
 
 I checked whether anyone else was already on this. Four gates:
 
-1. **Issue timeline** — `gh api repos/anomalyco/opencode/issues/39142/timeline` returned no cross-references. No linked PR.
+1. **Issue timeline** — no cross-referenced PRs. The only timeline event is an `assigned`. **The issue is assigned to `Brendonovich` (Brendan Allan, `@anomalyco`), who owns `packages/app`.** My first pass filtered the timeline to `cross-referenced` events only and never saw this, which was a real hole in my gate. Following up: the assignment was made by `github-actions[bot]` 93 seconds after the issue was filed, and every recent issue I sampled has the same pattern (#39218 → Brendonovich, #39221 → rekram1-node, #39125 → nexxeln, #39194 → jlongster, #39190 → kitlangton), so it is automatic routing to an area owner rather than someone claiming the work. My own accepted contribution 3 issue (#35860) was auto-assigned to StarpTech and PR #35867 was still welcome. None of Brendan's open PRs touch the picker.
 2. **Keyword PR search** — `gh search prs --repo anomalyco/opencode "dialog-select-directory"` and `"recent projects search"` surfaced nothing covering this.
-3. **Open PRs touching the file** — two exist: [#34894](https://github.com/anomalyco/opencode/pull/34894) ("reslove issue of not showing file and dirs list") and [#38345](https://github.com/anomalyco/opencode/pull/38345) ("Improve keyboard navigation and add accept button in open project dialog"). I diffed both against `slice(0, 5)` and `recentProjects` — neither touches this logic. Merge-conflict risk in the same file, but not a duplicate fix.
+3. **Open PRs touching the file** — scanned all 200 open PRs by file path. Three touch this area: [#38345](https://github.com/anomalyco/opencode/pull/38345), [#34894](https://github.com/anomalyco/opencode/pull/34894), [#37612](https://github.com/anomalyco/opencode/pull/37612). Diffed each for `recentProjects`, `slice(0, 5)`, and `visibleRecentProjects` — zero matches. Merge-conflict risk in the same file, but not a duplicate fix. I also fetched the plausible picker-related branches on the upstream remote (`fix/edit-project-dialog`, `child-session-picker`, `directory-attachment-expansion`) and confirmed `.slice(0, 5)` is still present on all of them.
 4. **Bug still present on `dev`** — confirmed above at line 105.
 
-All four pass.
+All four pass, and I re-ran every one of them against a freshly fetched `dev` immediately before finalizing.
 
 ### Implementation Plan (UMPIRE)
 
@@ -222,9 +222,29 @@ diff /tmp/tc-dev.txt /tmp/tc-branch.txt
 
 My first attempt at this baseline used `git stash`, which silently did nothing — my changes were already committed, so both runs measured the same tree and reported a meaningless "identical". Reverting the specific files is the only version of this that actually works once you've committed.
 
-**What I did not verify.** I did not exercise this in the running Desktop app. `packages/app/AGENTS.md` documents how (`bun run --conditions=browser ./src/index.ts serve --port 4096` from `packages/opencode`, `bun dev -- --port 4444` from `packages/app`), but reproducing requires six or more real projects with session history, and creating those would write into the actual local opencode state. I verified by reading the path end to end and unit-testing the extracted limit instead. That is a real gap and I've stated it in the PR rather than implying coverage I don't have.
+**Reproduction against the real pipeline.** I did not want to rely on having reasoned correctly, so I built a harness from the actual production pieces: real `displayPickerPath` and `getFilename` imported from the repo, `toRow()` copied verbatim from the component, and real `fuzzysort` called exactly as `use-filtered-list.tsx` calls it, including its `if (!needle) return x` short-circuit. Seven projects; the only variable between runs is where `.slice(0, 5)` sits.
 
----
+```
+=== PRE-FIX (.slice(0,5) inside recentProjects) ===
+PASS  searching 'foxtrot' finds nothing (THE BUG)        got []
+PASS  searching 'golf' finds nothing (THE BUG)           got []
+PASS  searching 'alpha' reaches alpha-service            got [true]
+PASS  idle list shows 5                                  got [alpha-service, bravo-web, charlie-api, delta-tools, echo-infra]
+
+=== POST-FIX (cap applied only when query is empty) ===
+PASS  searching 'foxtrot' finds it (FIXED)               got [foxtrot-docs]
+PASS  searching 'golf' finds it (FIXED)                  got [golf-mobile]
+PASS  searching 'alpha' still reaches alpha-service      got [true]
+PASS  idle list still shows exactly 5 (UNCHANGED)        got [alpha-service, bravo-web, charlie-api, delta-tools, echo-infra]
+
+ALL ASSERTIONS HELD
+```
+
+This is the step that turned "I traced the code and believe this is the cause" into a demonstration. It also caught two flaws in my own first harness: I asserted that searching `alpha` would return exactly one row, but `fuzzysort` is fuzzy and legitimately also matched `charlie-api` and `echo-infra`; and I asserted the idle list would show five when my harness returned zero, because I had forgotten to replicate `useFilteredList`'s empty-needle short-circuit and was passing an empty needle straight into `fuzzysort.go`. Both were wrong expectations in the test, not defects in the code, but a harness whose failures I could wave away would have been worthless.
+
+The harness stays out of the committed diff. Putting it in the test suite would mean copying `toRow` into tests, and root `AGENTS.md` says to test the actual implementation rather than duplicate logic into tests. Its output goes in the PR as verification evidence instead.
+
+**What I still have not verified.** I have not run this in the Desktop app with six real projects and session history. The harness exercises the same code path with real inputs, but it is a harness, not the app, and I say so in the PR rather than implying otherwise.
 
 ## Implementation Notes
 
@@ -332,7 +352,23 @@ The branch is complete and verified locally. Both commits are in place, tests pa
 >
 > ### How did you verify your code works?
 >
-> Added a regression test to `packages/app/src/components/directory-picker-domain.test.ts` covering both branches. The empty-query case pins the behavior that shouldn't change, and the non-empty case fails against the old code, which returned five rows regardless of the query.
+> **Reproduced the bug against the real pipeline first.** I built a harness using the actual production pieces — the real `displayPickerPath` and `getFilename`, `toRow()` copied verbatim from the component, and real `fuzzysort` invoked exactly as `use-filtered-list.tsx` invokes it (`fuzzysort.go(needle, rows, { keys: ["search"] })`, including its `if (!needle) return x` short-circuit). Seven projects, and the only thing varying between the two runs is where `.slice(0, 5)` sits:
+>
+> ```
+> === PRE-FIX (.slice(0,5) inside recentProjects) ===
+> searching 'foxtrot' -> []                                   <- the bug, 6th project unreachable
+> searching 'golf'    -> []                                   <- the bug, 7th project unreachable
+> searching 'alpha'   -> reaches alpha-service                 (top-5 project still fine)
+> idle list           -> alpha-service, bravo-web, charlie-api, delta-tools, echo-infra
+>
+> === POST-FIX (cap applied only when the query is empty) ===
+> searching 'foxtrot' -> [foxtrot-docs]                        <- fixed
+> searching 'golf'    -> [golf-mobile]                         <- fixed
+> searching 'alpha'   -> reaches alpha-service                 (unchanged)
+> idle list           -> alpha-service, bravo-web, charlie-api, delta-tools, echo-infra  (unchanged)
+> ```
+>
+> That harness stayed out of the diff, since committing it would mean duplicating `toRow` into the test suite. What is committed is a regression test in `directory-picker-domain.test.ts` covering both branches of the limit. The empty-query case pins the behavior that shouldn't change; the non-empty case fails against the old code, which returned five rows regardless of the query.
 >
 > ```
 > $ cd packages/app && bun test src/components/directory-picker-domain.test.ts
@@ -341,18 +377,18 @@ The branch is complete and verified locally. Both commits are in place, tests pa
 >  21 pass
 >  0 fail
 >  75 expect() calls
-> Ran 21 tests across 1 file. [290.00ms]
+> Ran 21 tests across 1 file. [129.00ms]
 > ```
 >
 > The sibling suite still passes (`bun test src/components/directory-picker.test.ts` — 1 pass, 0 fail).
 >
-> `bun typecheck` from `packages/app` reports 319 errors both before and after this change. They come from `@opencode-ai/client/promise` not resolving in my checkout and the implicit-`any` cascade behind it. I diffed the full sorted output against the same command run with these three files reverted to `dev`: every difference is a line-number shift with identical error text and column, so this change introduces none of them. `prettier --check` is clean on all three files.
+> `bun typecheck` from `packages/app` reports 319 errors both before and after this change. They come from `@opencode-ai/client/promise` not resolving in my checkout and the implicit-`any` cascade behind it. I diffed the full sorted output against the same command run with these three files reverted to `dev`: every difference is a line-number shift with identical error text and column, so this change introduces none of them. `prettier --check` is clean on all three files. Branch is rebased onto `dev` at 8021dbd80f.
 >
-> What I did not do is exercise this in the running Desktop app, which would need six or more real projects with session history. I verified it by reading the path instead — `recentProjects()` to `items()` to `props.items(store.filter)` to `fuzzysort.go` in `use-filtered-list.tsx` — and by unit-testing the extracted limit. The step that actually confirmed the diagnosis was checking that `List` filters the array it is handed rather than holding its own copy; if it did the latter, this patch would do nothing.
+> One thing I have not done is exercise this in the running Desktop app, which would need six or more real projects with session history. The harness above covers the same code path with real inputs, but it is a harness, not the app.
 >
 > ### Screenshots / recordings
 >
-> No screenshot. This change is deliberately invisible in the state a screenshot would capture: with an empty search box the dialog still renders the same five recent projects. The difference only appears while typing, with more than five projects open, where a previously unfindable project becomes selectable.
+> No screenshot. This change is deliberately invisible in the state a screenshot would capture: with an empty search box the dialog still renders the same five recent projects, which is the fourth assertion in each block above. The difference only appears while typing, with more than five projects open, where a previously unfindable project becomes selectable.
 >
 > ### Checklist
 >
@@ -423,6 +459,8 @@ Running list of every mistake made across these contributions, kept so they stop
 
 **Fixed dead code (Contribution 4).** Sanitized Bedrock document names in `packages/llm/src/protocols/utils/bedrock-media.ts`, which sits behind `OPENCODE_EXPERIMENTAL_NATIVE_LLM` and never runs for Bedrock. Every Bedrock request goes through the AI SDK path in `ProviderTransform.message()`. PR #37535 fixed the live path and the work was wasted. Rule: trace the runtime path from entry point to wire and confirm the function is reachable for the failing case before writing anything.
 
+**Filtered the issue timeline too narrowly (caught this contribution).** My gate queried only `cross-referenced` events, so it silently skipped the `assigned` event and I did not notice for two rounds of review that #39142 is assigned to a core maintainer. It turned out to be automatic routing, but I did not know that when I claimed the gate had passed. Rule: read the whole timeline, then explain each event, rather than grepping for the one event type you expect.
+
 **Trusted a single "no competing PR" search (Contribution 1).** `gh pr list --search "27133 in:body"` returned empty, so I opened PR #31992. A duplicate-detection bot then flagged PR #29784, filed two weeks earlier, same file, same approach. GitHub body-text search is unreliable; the issue timeline is authoritative. Rule: run all four gates, and re-run them right before opening.
 
 **Did not read the per-package `AGENTS.md`.** Both the Bedrock miss and this contribution's near-miss trace to the same habit. `packages/app/AGENTS.md` existed the whole time and I only found it by listing every `AGENTS.md` in the tree. Rule: `git ls-tree -r upstream/dev --name-only | grep AGENTS.md` before touching a package.
@@ -438,6 +476,10 @@ Running list of every mistake made across these contributions, kept so they stop
 **Used `git commit --amend -- <path>` to move a file between commits.** It adds the path to HEAD rather than the earlier commit, silently putting a source change inside the test commit. Rule: `git reset --soft <base>` and re-stage per commit.
 
 **Let the branch base go stale.** Branched at `c8487bac54`; `dev` released v1.18.8 while I worked, so the final diff appeared to revert version bumps across forty-odd files. Rule: rebase onto the current default branch and read the full diff — not the `--stat` — immediately before opening.
+
+**Wrote a verification harness that could not fail.** My first reproduction asserted a fuzzy search would return exactly one row and that an idle list would render five, when the harness passed an empty needle straight into `fuzzysort` and returned zero. Both assertions were wrong about the harness, not the code. Rule: when a check fails, first ask whether the check or the code is wrong, and treat a check that only ever passes as untested.
+
+**Deferred reproduction until after writing the fix.** I traced the code, wrote the patch, and only demonstrated the bug when challenged on it. The demonstration confirmed the diagnosis, but the order was backwards, and had it disconfirmed the diagnosis I would have thrown away finished work.
 
 **General ones worth keeping in view:** don't write PR bodies as dense bullet lists (the template warns AI-looking descriptions get closed, and a compliance bot closes non-conforming PRs within about two hours); don't run `bun test` from the repo root; don't claim `Closes #` unless the fix resolves the issue end to end; and don't let a fix quietly grow past the issue's scope, since "I have not included unrelated changes" is taken literally.
 
