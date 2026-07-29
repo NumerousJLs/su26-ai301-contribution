@@ -5,7 +5,7 @@
 **Issue:** [anomalyco/opencode#39142](https://github.com/anomalyco/opencode/issues/39142)  
 **Related issue:** [#7111](https://github.com/anomalyco/opencode/issues/7111) ("Recent projects not found in 'Open Project' dialog search") — same bug, reported earlier and closed as stale on 2026-05-22 with a request to reopen if still relevant. It was.  
 **Fork:** [github.com/NumerousJLs/opencode](https://github.com/NumerousJLs/opencode)  
-**Branch:** `project-picker-search` (rebased onto `dev` @ `8021dbd80f`, v1.18.8)  
+**Branch:** `project-picker-search` (rebased onto `dev` @ `f28d72d15e`)  
 **Pull Request:** *(pending — see Pull Request section)*  
 **Status:** Phase III Complete — implementation, unit test, and committed e2e regression spec done; PR not yet opened
 
@@ -95,9 +95,11 @@ The `.slice(0, 5)` is not wrong in intent. The idle dialog genuinely should show
 
 Standard `bun install` from the repo root. Bun is the runtime, not Node.
 
-The one real friction is typechecking. `packages/app` reports **319 errors on a clean checkout of `dev`**, almost all `TS7006: implicitly has an 'any' type` cascading from `Cannot find module '@opencode-ai/client/promise'`. That subpath isn't in the client package's `exports` map, so it doesn't resolve in a plain `bun install` checkout. Absolute error counts are therefore meaningless here; only the delta against a baseline means anything. Method is in Testing Strategy below.
+The one real friction was self-inflicted and worth recording, because I reported it as a property of the repo for two rounds before catching it. `bun typecheck` in `packages/app` was returning **319 errors**, almost all `TS7006: implicitly has an 'any' type` cascading from `Cannot find module '@opencode-ai/client/promise'`. I treated that as a pre-existing repo condition and carefully diffed against it as a baseline.
 
-Root `AGENTS.md` also mandates `bun typecheck` from the package directory rather than calling `tsc` directly. My first pass used `bunx tsc --noEmit`, which is the wrong command for this repo even though it produces similar output.
+It was not. `packages/app` depends on a vendored tarball (`"@opencode-ai/client": "file:vendor/opencode-ai-client-1.17.13-v2.tgz"`) plus `@corvu/drawer`, and neither was installed in my checkout. Running `bun install` from the repo root fixed all 319: `bun typecheck` now exits 0 with zero errors, and `bun.lock` is untouched. I only found this when I tried to actually run the app and Vite reported the same unresolved imports.
+
+Root `AGENTS.md` also mandates `bun typecheck` from the package directory rather than calling `tsc` directly. My first pass used `bunx tsc --noEmit`, which is the wrong command for this repo.
 
 ### Steps to Reproduce
 
