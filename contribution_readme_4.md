@@ -7,7 +7,7 @@
 **Fork:** [github.com/NumerousJLs/opencode](https://github.com/NumerousJLs/opencode)  
 **Branch:** `project-picker-search` (rebased onto `dev` @ `8021dbd80f`, v1.18.8)  
 **Pull Request:** *(pending — see Pull Request section)*  
-**Status:** Phase III Complete — implementation and tests done, PR not yet opened
+**Status:** Phase III Complete — implementation, unit test, and committed e2e regression spec done; PR not yet opened
 
 ---
 
@@ -176,7 +176,24 @@ test("keeps every recent project searchable but caps the idle list", () => {
 })
 ```
 
-Both halves matter. The first pins the behavior I did *not* want to change — the idle dialog still shows five. The second is the regression: against the old code it returns five items and fails, because the old code sliced unconditionally.
+Both halves matter: the first pins the behavior I did *not* want to change, the second describes the new rule.
+
+**This unit test does not pin the original bug, and I initially claimed it did.** A Codex review caught it. The helper did not exist before this change, so the test cannot be run against the old code at all — and if someone re-added `.slice(0, 5)` to `recentProjects()` while keeping the helper, all 21 tests still pass. I verified that by doing exactly that: 21 pass, 0 fail, with the bug fully restored. A unit test of a downstream helper can never detect that an upstream caller truncated its input.
+
+So I added a committed Playwright regression spec, `packages/app/e2e/regression/project-picker-recent-search.spec.ts`, following the convention already established by ~39 specs in that directory (maintainer PR #39241 added one alongside a fix). It seeds six projects via `addInitScript` and `mockOpenCodeServer`, opens the dialog, and asserts both directions. Assertions are scoped to `[data-directory-path]` because the sidebar renders the same project names and a naive text match produced a false failure.
+
+I then proved it pins the bug by reverting both source files to `dev` and re-running:
+
+```
+# on the fix
+2 passed (11.7s)
+
+# source files reverted to dev
+1 failed  › searches every recent project, not just the five most recent
+1 passed  › still caps the idle recent list at five projects
+```
+
+The regression case goes red and the invariant case stays green — which is the signature a real regression test should have.
 
 The test uses plain strings rather than `Row` objects on purpose. `visibleRecentProjects` is generic over the element type and does not inspect elements, so constructing real rows would add setup that tests nothing.
 
@@ -420,9 +437,11 @@ return uniqueRows([...recent, ...directoryRows])
 **Acceptance criteria:**
 - [x] Projects outside the five most recent are searchable by name
 - [x] Idle dialog still shows exactly five recent projects — no visual change
-- [x] Regression test added; fails against the pre-fix behavior
+- [x] Committed e2e regression spec added; verified to fail against the pre-fix code
+- [x] Unit test added for the visibility rule (does not pin the bug on its own — stated plainly)
 - [x] Existing tests pass (21 pass, 0 fail in the domain suite; 1 pass, 0 fail in the sibling suite)
-- [x] No new typecheck errors (319 before and after; verified by diffing full sorted output against a `dev` baseline)
+- [x] `bun typecheck` and `bun typecheck:e2e` clean (exit 0)
+- [x] `bunx oxlint` — 0 errors; 11 warnings pre-existing and identical on `dev`
 - [x] Prettier clean on all changed files
 - [x] Diff scoped to the issue — no unrelated changes
 - [x] Branch name follows `AGENTS.md` (three words, hyphens, no slash or type prefix)
