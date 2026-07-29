@@ -227,43 +227,11 @@ $ bun test src/components/directory-picker.test.ts
 - `prettier --check` on all three changed files → "All matched files use Prettier code style!"
 - Read `useFilteredList` line by line to confirm `items()`'s return value is the sole filter input — this is the step that actually proved the diagnosis rather than assuming it.
 
-**Typecheck, done as a delta.** Because `packages/app` has 319 pre-existing errors, I compared full sorted output between my branch and the same three files reverted to `dev`:
+**Typecheck.** After `bun install`, `bun typecheck` in `packages/app` exits 0 with zero errors, and `bun typecheck:e2e` (which covers the e2e specs, and is a separate command) also exits 0.
 
-```bash
-bun typecheck 2>&1 | sort > /tmp/tc-branch.txt
-git checkout upstream/dev -- <the three files>
-bun typecheck 2>&1 | sort > /tmp/tc-dev.txt
-git checkout HEAD -- <the three files>
-diff /tmp/tc-dev.txt /tmp/tc-branch.txt
-```
+Before I found the missing install, I had built a delta harness against the 319-error "baseline": capture sorted output on the branch, revert the three files to `dev`, capture again, diff. That method is sound and worth keeping for cases where a clean baseline genuinely isn't available — but here it was measuring my own broken environment. My first attempt at it also used `git stash`, which silently did nothing because the work was already committed, so both runs measured the same tree and reported a confident, meaningless "identical". Reverting specific files is the only version that works once you've committed.
 
-319 errors on both sides. Every line in the diff is the same error text and column at a shifted line number, caused by the lines I added. Nothing introduced.
-
-My first attempt at this baseline used `git stash`, which silently did nothing — my changes were already committed, so both runs measured the same tree and reported a meaningless "identical". Reverting the specific files is the only version of this that actually works once you've committed.
-
-**Reproduction against the real pipeline.** I did not want to rely on having reasoned correctly, so I built a harness from the actual production pieces: real `displayPickerPath` and `getFilename` imported from the repo, `toRow()` copied verbatim from the component, and real `fuzzysort` called exactly as `use-filtered-list.tsx` calls it, including its `if (!needle) return x` short-circuit. Seven projects; the only variable between runs is where `.slice(0, 5)` sits.
-
-```
-=== PRE-FIX (.slice(0,5) inside recentProjects) ===
-PASS  searching 'foxtrot' finds nothing (THE BUG)        got []
-PASS  searching 'golf' finds nothing (THE BUG)           got []
-PASS  searching 'alpha' reaches alpha-service            got [true]
-PASS  idle list shows 5                                  got [alpha-service, bravo-web, charlie-api, delta-tools, echo-infra]
-
-=== POST-FIX (cap applied only when query is empty) ===
-PASS  searching 'foxtrot' finds it (FIXED)               got [foxtrot-docs]
-PASS  searching 'golf' finds it (FIXED)                  got [golf-mobile]
-PASS  searching 'alpha' still reaches alpha-service      got [true]
-PASS  idle list still shows exactly 5 (UNCHANGED)        got [alpha-service, bravo-web, charlie-api, delta-tools, echo-infra]
-
-ALL ASSERTIONS HELD
-```
-
-This is the step that turned "I traced the code and believe this is the cause" into a demonstration. It also caught two flaws in my own first harness: I asserted that searching `alpha` would return exactly one row, but `fuzzysort` is fuzzy and legitimately also matched `charlie-api` and `echo-infra`; and I asserted the idle list would show five when my harness returned zero, because I had forgotten to replicate `useFilteredList`'s empty-needle short-circuit and was passing an empty needle straight into `fuzzysort.go`. Both were wrong expectations in the test, not defects in the code, but a harness whose failures I could wave away would have been worthless.
-
-The harness stays out of the committed diff. Putting it in the test suite would mean copying `toRow` into tests, and root `AGENTS.md` says to test the actual implementation rather than duplicate logic into tests. Its output goes in the PR as verification evidence instead.
-
-**What I still have not verified.** I have not run this in the Desktop app with six real projects and session history. The harness exercises the same code path with real inputs, but it is a harness, not the app, and I say so in the PR rather than implying otherwise.
+**Lint.** `bun lint` maps to `oxlint`. On the three changed source files: 0 errors, 11 warnings — identical counts on `dev` and on the branch, so the change introduces none. The new e2e spec is clean at 0 warnings. I ran this as an explicit delta after the same shell-quoting mistake made `oxlint` report "No files found to lint" rather than failing loudly.
 
 ## Implementation Notes
 
@@ -361,53 +329,64 @@ The branch is complete and verified locally. Both commits are in place, tests pa
 >
 > ### What does this PR do?
 >
-> Typing a project's name into the Open Project dialog now finds it even when it isn't one of the five most recent.
+> Searching the Open Project dialog only ever matched the five most recent projects. A sixth project — open, and visible in the sidebar — returned "No folders found" when searched by name, though typing its full absolute path still worked.
 >
-> Before this change, `recentProjects()` in `dialog-select-directory.tsx` sorted every known project by last session activity and then called `.slice(0, 5)` while building its rows. Those rows are what `items()` returns, and `items()` is what `List` is given. `useFilteredList` calls `props.items(store.filter)` and runs `fuzzysort.go` over exactly that result, so the truncation was happening one step before the only filtering in the pipeline. Projects outside the top five weren't ranked low by the search, they were never candidates for it, which is why a project that was open and visible in the sidebar still came back as "No folders found". Typing the full absolute path worked, because that path is resolved by the directory browser instead of the recent-projects list, and that split is what makes the bug look like an inconsistent search rather than a truncated list. The `.slice(0, 5)` itself isn't wrong, the idle dialog should show five recents rather than every project ever opened; it was just sitting inside a function whose output doubles as the search corpus.
+> `recentProjects()` sorted every known project by last session activity, then truncated with `.slice(0, 5)` while building its rows. Those rows are what `items()` hands to `List`, and `useFilteredList` runs `fuzzysort.go` over exactly that array — so the cap was applied one step before the only filtering in the pipeline, and projects past the fifth were never search candidates rather than being ranked low. Absolute paths still worked because those resolve through `createDirectorySearch` instead, which is why this reads as an inconsistent search rather than a truncated list.
 >
-> This PR moves the cap to the point where the query is known. `recentProjects()` now returns rows for every project, and `items()` applies the limit through `visibleRecentProjects()` only when the search box is empty, so the idle dialog renders exactly as it did before and typing searches the whole set. The limit helper sits in `directory-picker-domain.ts` alongside `currentPickerSuggestions`, `pickerMode`, and `nextSuggestionIndex`, which are the existing single-use, query-dependent helpers in this module that are extracted so `directory-picker-domain.test.ts` can cover them. `.slice()` on a shorter array still returns the whole array, so nothing changes for users with fewer than five projects, and `uniqueRows()` still dedupes against the directory rows afterwards.
+> The cap itself is right, it was just in the wrong place. This moves it to `items()`, where the query is known:
 >
-> The truncation traces to 1f108bc401 ("feat(app): recent projects section in command pallette", #15270), so this has been the behavior since the section was introduced rather than being a recent regression. #7111 reported the same symptom and was closed as stale.
+> ```diff
+>        .sort((a, b) => b.at - a.at || a.index - b.index)
+> -      .slice(0, 5)
+>        .map(({ project }) => {
+> ```
+>
+> ```diff
+> -    return uniqueRows([...recentProjects(), ...directoryRows])
+> +    const recent = visibleRecentProjects(recentProjects(), value, RECENT_PROJECT_LIMIT)
+> +    return uniqueRows([...recent, ...directoryRows])
+> ```
+>
+> `visibleRecentProjects` returns the first `limit` rows when the search box is empty and all rows otherwise, so the idle dialog is unchanged and typing searches everything. Nothing changes below five projects, and `uniqueRows()` still dedupes against the directory rows afterwards.
+>
+> The truncation dates to 1f108bc401 (#15270) — this has been the behaviour since the section was added, not a recent regression. #7111 reported the same symptom and was closed as stale.
 >
 > ### How did you verify your code works?
 >
-> **Reproduced the bug against the real pipeline first.** I built a harness using the actual production pieces — the real `displayPickerPath` and `getFilename`, `toRow()` copied verbatim from the component, and real `fuzzysort` invoked exactly as `use-filtered-list.tsx` invokes it (`fuzzysort.go(needle, rows, { keys: ["search"] })`, including its `if (!needle) return x` short-circuit). Seven projects, and the only thing varying between the two runs is where `.slice(0, 5)` sits:
+> Added `e2e/regression/project-picker-recent-search.spec.ts`, which registers six projects and covers both directions: the sixth is findable by name, and the idle list is still capped at five. I confirmed it pins the bug by reverting both source files to `dev` and re-running — the search case fails, the idle-cap case still passes.
 >
 > ```
-> === PRE-FIX (.slice(0,5) inside recentProjects) ===
-> searching 'foxtrot' -> []                                   <- the bug, 6th project unreachable
-> searching 'golf'    -> []                                   <- the bug, 7th project unreachable
-> searching 'alpha'   -> reaches alpha-service                 (top-5 project still fine)
-> idle list           -> alpha-service, bravo-web, charlie-api, delta-tools, echo-infra
+> $ bunx playwright test e2e/regression/project-picker-recent-search.spec.ts --project=chromium
+>   2 passed (11.7s)
 >
-> === POST-FIX (cap applied only when the query is empty) ===
-> searching 'foxtrot' -> [foxtrot-docs]                        <- fixed
-> searching 'golf'    -> [golf-mobile]                         <- fixed
-> searching 'alpha'   -> reaches alpha-service                 (unchanged)
-> idle list           -> alpha-service, bravo-web, charlie-api, delta-tools, echo-infra  (unchanged)
+> # same spec, source files reverted to dev
+>   1 failed  › searches every recent project, not just the five most recent
+>   1 passed  › still caps the idle recent list at five projects
 > ```
 >
-> That harness stayed out of the diff, since committing it would mean duplicating `toRow` into the test suite. What is committed is a regression test in `directory-picker-domain.test.ts` covering both branches of the limit. The empty-query case pins the behavior that shouldn't change; the non-empty case fails against the old code, which returned five rows regardless of the query.
+> There is also a unit test for `visibleRecentProjects`, but it exercises the helper in isolation — the spec above is what guards the integration.
 >
-> ```
-> $ cd packages/app && bun test src/components/directory-picker-domain.test.ts
-> bun test v1.3.14 (0d9b296a)
->
->  21 pass
->  0 fail
->  75 expect() calls
-> Ran 21 tests across 1 file. [129.00ms]
-> ```
->
-> The sibling suite still passes (`bun test src/components/directory-picker.test.ts` — 1 pass, 0 fail).
->
-> `bun typecheck` from `packages/app` reports 319 errors both before and after this change. They come from `@opencode-ai/client/promise` not resolving in my checkout and the implicit-`any` cascade behind it. I diffed the full sorted output against the same command run with these three files reverted to `dev`: every difference is a line-number shift with identical error text and column, so this change introduces none of them. `prettier --check` is clean on all three files. Branch is rebased onto `dev` at 8021dbd80f.
->
-> One thing I have not done is exercise this in the running Desktop app, which would need six or more real projects with session history. The harness above covers the same code path with real inputs, but it is a harness, not the app.
+> - `bun test src/components/directory-picker-domain.test.ts` — 21 pass, 0 fail
+> - `bun test src/components/directory-picker.test.ts` — 1 pass, 0 fail
+> - `bun typecheck` and `bun typecheck:e2e` in `packages/app` — both clean
+> - `bunx oxlint` on the changed files — 0 errors; the 11 warnings are pre-existing and identical on `dev`
+> - `prettier --check` clean
 >
 > ### Screenshots / recordings
 >
-> No screenshot. This change is deliberately invisible in the state a screenshot would capture: with an empty search box the dialog still renders the same five recent projects, which is the fourth assertion in each block above. The difference only appears while typing, with more than five projects open, where a previously unfindable project becomes selectable.
+> Six projects registered; `foxtrot-docs` is the sixth and sits outside the five-item cap. It is visible in the sidebar in every shot.
+>
+> **Before — searching `foxtrot` finds nothing**
+>
+> <!-- drag before-2-search-foxtrot.png here -->
+>
+> **After — searching `foxtrot` finds it**
+>
+> <!-- drag after-2-search-foxtrot.png here -->
+>
+> **Idle dialog after the change — still exactly five recents, unchanged**
+>
+> <!-- drag after-1-idle.png here -->
 >
 > ### Checklist
 >
