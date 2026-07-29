@@ -81,7 +81,7 @@ The `.slice(0, 5)` is not wrong in intent. The idle dialog genuinely should show
 
 - `packages/app/src/components/dialog-select-directory.tsx` — `recentProjects()` (the truncation) and `items()` (where the query is available)
 - `packages/ui/src/hooks/use-filtered-list.tsx` — the fuzzysort filter that only sees what `items()` returns. Not modified; needed to confirm the diagnosis.
-- `packages/app/src/components/directory-picker-domain.ts` — the pure-logic sibling module where the limit helper now lives
+- `packages/app/e2e/regression/project-picker-recent-search.spec.ts` — the committed Playwright spec that pins the behaviour end to end
 
 ### When This Broke
 
@@ -148,7 +148,9 @@ All four pass, and I re-ran every one of them against a freshly fetched `dev` im
 1. Delete `.slice(0, 5)` from `recentProjects()` so the memo returns rows for every known project.
 2. Add `visibleRecentProjects(rows, query, limit)` to `directory-picker-domain.ts`, next to `currentPickerSuggestions`. Returns `rows.slice(0, limit)` for an empty query, `rows` otherwise.
 3. Call it in `items(value)`, where the query is in scope. Extract the `5` to a named `RECENT_PROJECT_LIMIT` constant so the magic number is not just relocated.
-4. Add a regression test to `directory-picker-domain.test.ts` covering both branches.
+4. Add a regression test covering both branches.
+
+*(Steps 2 and 3 were later reversed. The helper and its unit test were removed in favour of inlining the cap plus a Playwright spec. See "Second Review Round" below.)*
 
 **Review:** Two commits (fix, then test), conventional-commit subjects, `git add` on named paths only. Prettier check on all three files. Typecheck compared against a stashed baseline so pre-existing errors aren't misread as new ones.
 
