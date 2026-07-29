@@ -5,9 +5,9 @@
 **Issue:** [anomalyco/opencode#39142](https://github.com/anomalyco/opencode/issues/39142)  
 **Related issue:** [#7111](https://github.com/anomalyco/opencode/issues/7111) ("Recent projects not found in 'Open Project' dialog search") — same bug, reported earlier and closed as stale on 2026-05-22 with a request to reopen if still relevant. It was.  
 **Fork:** [github.com/NumerousJLs/opencode](https://github.com/NumerousJLs/opencode)  
-**Branch:** `project-picker-search` (rebased onto `dev` @ `f28d72d15e`)  
+**Branch:** `project-picker-search` (rebased onto `dev` @ `1e17856ba4`)  
 **Pull Request:** *(pending — see Pull Request section)*  
-**Status:** Phase III Complete — implementation, unit test, and committed e2e regression spec done; PR not yet opened
+**Status:** Phase III Complete. Fix inlined to two files, committed e2e regression spec verified to fail against `dev`, screenshots hosted and embedded. PR not yet opened.
 
 ---
 
@@ -296,6 +296,25 @@ One rule I deliberately did not follow to the letter. Root `AGENTS.md` says twic
 
 I also dropped the explicit `: readonly T[]` return annotation to match the neighbors, since `AGENTS.md` prefers inference.
 
+### Second Review Round: Simplifying Away the Helper
+
+A second Codex pass flagged that the extracted `visibleRecentProjects` helper had become redundant. That was correct, and I removed it.
+
+The helper's justification had always been testability, and I defended it by showing that `currentPickerSuggestions`, `pickerMode`, `nextSuggestionIndex`, and `advanceTreePreload` in the same module are all single-use-but-tested. Once the Playwright spec existed and covered the real dialog, that justification evaporated: the integration was under test, so the extraction was buying nothing that root `AGENTS.md` does not explicitly discourage ("Do not extract single-use helpers preemptively").
+
+Inlining it collapsed the change from four files to two:
+
+```ts
+// Cap the idle list only. Once a query narrows the results, every project stays searchable.
+const recent = recentProjects()
+const visible = value ? recent : recent.slice(0, RECENT_PROJECT_LIMIT)
+return uniqueRows([...visible, ...directoryRows])
+```
+
+The unit test went with it, which is the right trade. It was the test that could not fail, and the spec that replaced it is stronger. I re-verified that the spec still fails against `dev` after inlining, so the coverage claim survives the simplification. Final diff is `+66/-2` across one source file and one spec.
+
+The same review also caught em dashes throughout the PR body, which violates a hard rule in my own writing notes for public technical writing, and flagged that the screenshots were still placeholders. GitHub has no CLI path for image upload, so I committed the three PNGs to this repository under `pr-screenshots/` and referenced them by `raw.githubusercontent.com` URL, which renders in the PR without needing the web editor. Body is now 491 words with zero em dashes.
+
 ### Challenges Faced
 
 **Verifying the diagnosis instead of accepting it.** The issue reporter named the root cause correctly and even proposed the fix. It would have been easy to apply it and move on. But their claim only holds if `List` filters the array it receives rather than fetching its own data — and I had no idea whether that was true. Opening `use-filtered-list.tsx` and finding `props.items(store.filter)` feeding straight into `fuzzysort.go` is what turned a plausible report into a confirmed one. If `List` had held its own unfiltered copy, the same patch would have done nothing.
@@ -314,7 +333,7 @@ I also dropped the explicit `: readonly T[]` return annotation to match the neig
 
 The branch is complete and verified locally. Both commits are in place, tests pass, the four pre-submission gates were re-run immediately before finalizing (issue timeline still shows no cross-references; the three open PRs touching this file — #34894, #38345, #37612 — have zero matches on `recentProjects`, `slice(0, 5)`, or `visibleRecentProjects`; the truncation is still on `dev` at line 105), and the branch has been audited against the project's `AGENTS.md` files. It has not been pushed because I review the diff and PR description myself before anything goes to the upstream repo. This section will be updated with the link, submission date, and any maintainer feedback once it is opened.
 
-**Prepared PR description** (fills `.github/pull_request_template.md` verbatim — the repo auto-rejects PRs that don't follow it, and a compliance bot closes non-conforming PRs within about two hours):
+**Prepared PR description** (fills `.github/pull_request_template.md` verbatim):
 
 > ### Issue for this PR
 >
@@ -329,64 +348,57 @@ The branch is complete and verified locally. Both commits are in place, tests pa
 >
 > ### What does this PR do?
 >
-> Searching the Open Project dialog only ever matched the five most recent projects. A sixth project — open, and visible in the sidebar — returned "No folders found" when searched by name, though typing its full absolute path still worked.
+> Searching the Open Project dialog only matched the five most recent projects. A sixth project that was open and visible in the sidebar came back as "No folders found" when searched by name, although typing its full absolute path still found it.
 >
-> `recentProjects()` sorted every known project by last session activity, then truncated with `.slice(0, 5)` while building its rows. Those rows are what `items()` hands to `List`, and `useFilteredList` runs `fuzzysort.go` over exactly that array — so the cap was applied one step before the only filtering in the pipeline, and projects past the fifth were never search candidates rather than being ranked low. Absolute paths still worked because those resolve through `createDirectorySearch` instead, which is why this reads as an inconsistent search rather than a truncated list.
+> `recentProjects()` sorted every known project by last session activity and then called `.slice(0, 5)` while building its rows. Those rows are what `items()` hands to `List`, and `useFilteredList` runs `fuzzysort.go` over exactly that array, so the cap was applied one step before the only filtering in the pipeline. Projects past the fifth were not ranked low, they were never candidates. Absolute paths kept working because they resolve through `createDirectorySearch` instead, which is what makes the bug look like an inconsistent search rather than a truncated list.
 >
-> The cap itself is right, it was just in the wrong place. This moves it to `items()`, where the query is known:
->
-> ```diff
->        .sort((a, b) => b.at - a.at || a.index - b.index)
-> -      .slice(0, 5)
->        .map(({ project }) => {
-> ```
+> The cap belongs where the query is known, so it moves into `items()`:
 >
 > ```diff
 > -    return uniqueRows([...recentProjects(), ...directoryRows])
-> +    const recent = visibleRecentProjects(recentProjects(), value, RECENT_PROJECT_LIMIT)
-> +    return uniqueRows([...recent, ...directoryRows])
+> +    // Cap the idle list only. Once a query narrows the results, every project stays searchable.
+> +    const recent = recentProjects()
+> +    const visible = value ? recent : recent.slice(0, RECENT_PROJECT_LIMIT)
+> +    return uniqueRows([...visible, ...directoryRows])
 > ```
 >
-> `visibleRecentProjects` returns the first `limit` rows when the search box is empty and all rows otherwise, so the idle dialog is unchanged and typing searches everything. Nothing changes below five projects, and `uniqueRows()` still dedupes against the directory rows afterwards.
+> The idle dialog still shows five, and nothing changes below five projects. `uniqueRows()` still dedupes against the directory rows afterwards.
 >
-> The truncation dates to 1f108bc401 (#15270) — this has been the behaviour since the section was added, not a recent regression. #7111 reported the same symptom and was closed as stale.
+> `git log -S ".slice(0, 5)"` traces the line to 1f108bc401 (#15270), so this has been the behaviour since the recent-projects section was added rather than being a regression. #7111 reported the same symptom and was closed as stale.
 >
 > ### How did you verify your code works?
 >
-> Added `e2e/regression/project-picker-recent-search.spec.ts`, which registers six projects and covers both directions: the sixth is findable by name, and the idle list is still capped at five. I confirmed it pins the bug by reverting both source files to `dev` and re-running — the search case fails, the idle-cap case still passes.
+> `e2e/regression/project-picker-recent-search.spec.ts` registers six projects and covers both directions: the sixth is findable by name, and the idle list is still capped at five. I checked that it actually pins the bug by reverting the source file to `dev` and re-running, which turns the search case red and leaves the idle-cap case green.
 >
 > ```
 > $ bunx playwright test e2e/regression/project-picker-recent-search.spec.ts --project=chromium
->   2 passed (11.7s)
+>   2 passed (14.7s)
 >
-> # same spec, source files reverted to dev
+> # same spec, dialog-select-directory.tsx reverted to dev
 >   1 failed  › searches every recent project, not just the five most recent
 >   1 passed  › still caps the idle recent list at five projects
 > ```
 >
-> There is also a unit test for `visibleRecentProjects`, but it exercises the helper in isolation — the spec above is what guards the integration.
->
-> - `bun test src/components/directory-picker-domain.test.ts` — 21 pass, 0 fail
-> - `bun test src/components/directory-picker.test.ts` — 1 pass, 0 fail
-> - `bun typecheck` and `bun typecheck:e2e` in `packages/app` — both clean
-> - `bunx oxlint` on the changed files — 0 errors; the 11 warnings are pre-existing and identical on `dev`
+> - `bun typecheck` and `bun typecheck:e2e` in `packages/app`, both exit 0
+> - `bun test src/components/directory-picker.test.ts` and `directory-picker-domain.test.ts`, 21 pass, 0 fail
+> - `bunx oxlint`, 0 errors, and the one warning in this file is pre-existing and identical on `dev`
 > - `prettier --check` clean
 >
 > ### Screenshots / recordings
 >
-> Six projects registered; `foxtrot-docs` is the sixth and sits outside the five-item cap. It is visible in the sidebar in every shot.
+> Six projects registered, with `foxtrot-docs` sixth and outside the five-item cap. It is visible in the sidebar in every shot.
 >
-> **Before — searching `foxtrot` finds nothing**
+> Before, searching `foxtrot` finds nothing:
 >
-> <!-- drag before-2-search-foxtrot.png here -->
+> ![before](https://raw.githubusercontent.com/NumerousJLs/su26-ai301-contribution/main/pr-screenshots/before-2-search-foxtrot.png)
 >
-> **After — searching `foxtrot` finds it**
+> After, searching `foxtrot` finds it:
 >
-> <!-- drag after-2-search-foxtrot.png here -->
+> ![after](https://raw.githubusercontent.com/NumerousJLs/su26-ai301-contribution/main/pr-screenshots/after-2-search-foxtrot.png)
 >
-> **Idle dialog after the change — still exactly five recents, unchanged**
+> Idle dialog after the change, still exactly five recents:
 >
-> <!-- drag after-1-idle.png here -->
+> ![idle](https://raw.githubusercontent.com/NumerousJLs/su26-ai301-contribution/main/pr-screenshots/after-1-idle.png)
 >
 > ### Checklist
 >
