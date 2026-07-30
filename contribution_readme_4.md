@@ -3,7 +3,7 @@
 **Contribution Number:** 4  
 **Student:** Joshua Liu  
 **Issue:** [anomalyco/opencode#39142](https://github.com/anomalyco/opencode/issues/39142)  
-**Related issue:** [#7111](https://github.com/anomalyco/opencode/issues/7111) ("Recent projects not found in 'Open Project' dialog search") — same bug, reported earlier and closed as stale on 2026-05-22 with a request to reopen if still relevant. It was.  
+**Related issue:** [#7111](https://github.com/anomalyco/opencode/issues/7111) ("Recent projects not found in 'Open Project' dialog search"), filed 2026-01-06 by Yukaii. Same bug. Assigned to `rekram1-node`, confirmed still live by two other users in April 2026, then closed as **not planned** by that maintainer on 2026-05-22 with no stated reason. I originally wrote "closed as stale," which was wrong: the stale bot posted its 90-day notice in March but did not close it, and a human closed it two months later.  
 **Fork:** [github.com/NumerousJLs/opencode](https://github.com/NumerousJLs/opencode)  
 **Branch:** `project-picker-search` (rebased onto `dev` @ `1e17856ba4`)  
 **Pull Request:** *(pending — see Pull Request section)*  
@@ -85,7 +85,7 @@ The `.slice(0, 5)` is not wrong in intent. The idle dialog genuinely should show
 
 ### When This Broke
 
-`git log -S ".slice(0, 5)"` traces the line to `1f108bc401`, "feat(app): recent projects section in command pallette" ([PR #15270](https://github.com/anomalyco/opencode/pull/15270)), merged 2026-02-27. The truncation was present in the feature's first commit — this was never a regression, it shipped this way. Issue #7111 reported the symptom and was closed as stale on 2026-05-22 without the cause being found.
+`git log -S ".slice(0, 5)"` traces the line to `1f108bc401`, "feat(app): recent projects section in command pallette" ([PR #15270](https://github.com/anomalyco/opencode/pull/15270)), merged 2026-02-27. The truncation was present in the feature's first commit — this was never a regression, it shipped this way. Issue #7111 reported the symptom in January 2026 and was closed as not planned on 2026-05-22, after two users confirmed in April that it was still reproducible on Linux and Windows.
 
 ---
 
@@ -354,7 +354,7 @@ The branch is complete and verified locally. Both commits are in place, tests pa
 >
 > `recentProjects()` sorted every known project by last session activity and then called `.slice(0, 5)` while building its rows. Those rows are what `items()` hands to `List`, and `useFilteredList` runs `fuzzysort.go` over exactly that array, so the cap was applied one step before the only filtering in the pipeline. Projects past the fifth were not ranked low, they were never candidates. Absolute paths kept working because they resolve through `createDirectorySearch` instead, which is what makes the bug look like an inconsistent search rather than a truncated list.
 >
-> The cap belongs where the query is known, so it moves into `items()`:
+> The issue already identified this and proposed keeping every project as a search candidate while applying the cap only when the query is empty. That is what this does, by moving the cap into `items()` where the query is in scope:
 >
 > ```diff
 > -    return uniqueRows([...recentProjects(), ...directoryRows])
@@ -366,7 +366,9 @@ The branch is complete and verified locally. Both commits are in place, tests pa
 >
 > The idle dialog still shows five, and nothing changes below five projects. `uniqueRows()` still dedupes against the directory rows afterwards.
 >
-> `git log -S ".slice(0, 5)"` traces the line to 1f108bc401 (#15270), so this has been the behaviour since the recent-projects section was added rather than being a regression. #7111 reported the same symptom and was closed as stale.
+> `git log -S ".slice(0, 5)"` traces the line to 1f108bc401 (#15270), so this has been the behaviour since the recent-projects section was added rather than being a regression. #7111 reported the same symptom in January, had it confirmed as still live on Linux and Windows in April, and was closed as not planned in May without a stated reason.
+>
+> Worth being explicit about scope, since a nearby request was declined: #7877 asked for a way to see more than five recent projects, and this PR does not do that. The idle list is still exactly five. Only the set of rows offered to the filter changes, and only while the user is typing.
 >
 > ### How did you verify your code works?
 >
@@ -506,7 +508,9 @@ Two of my four contributions so far were beaten or invalidated by work I could h
 ## Resources Used
 
 - [anomalyco/opencode#39142](https://github.com/anomalyco/opencode/issues/39142) — the issue
-- [anomalyco/opencode#7111](https://github.com/anomalyco/opencode/issues/7111) — earlier report of the same behavior, closed as stale
+- [anomalyco/opencode#7111](https://github.com/anomalyco/opencode/issues/7111) — earlier report of the same behavior, closed as not planned
+- The wider cluster I should have walked from the start: [#7877](https://github.com/anomalyco/opencode/issues/7877) (asked to show more than five recents, went stale), [#12887](https://github.com/anomalyco/opencode/issues/12887) (added the recents section, completed), [#7545](https://github.com/anomalyco/opencode/issues/7545), [#7577](https://github.com/anomalyco/opencode/issues/7577), [#8325](https://github.com/anomalyco/opencode/issues/8325), [#12487](https://github.com/anomalyco/opencode/issues/12487), [#23587](https://github.com/anomalyco/opencode/issues/23587)
+- [PR #12886](https://github.com/anomalyco/opencode/pull/12886) (unmerged) and [PR #15270](https://github.com/anomalyco/opencode/pull/15270) (merged, introduced the slice)
 - [anomalyco/opencode#15270](https://github.com/anomalyco/opencode/pull/15270) — the PR that introduced the recent-projects section and the truncation
 - `packages/app/src/components/dialog-select-directory.tsx` — the dialog changed
 - `packages/app/src/components/directory-picker-domain.ts` — where the limit helper lives
